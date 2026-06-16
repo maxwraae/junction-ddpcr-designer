@@ -57,11 +57,20 @@ the probes, per Bio-Rad's probe-over-primer rule; the run anneal is set near the
 
 ## How it chooses (the principles)
 
-1. **Each probe crosses the junction and carries all discriminating bases** — so it reports the spliced product and discriminates.
-2. **Matched Tms within 2 °C of each other, at or above the primers.** The cold (AT-rich) probe is allowed down to primer level; the anneal gradient sets the working temp.
-3. **Rank by the *weaker* probe's discrimination first** (so neither probe is the weak link), then prefer **concentric windows** (the shorter probe nested in the longer, same centre → both compete at one site), then the smaller Tm gap, then shorter probes.
+**No temperature is preset — every Tm is derived from your sequences.** Only *constraints* are fixed
+(the gap, the matched-window, a discrimination floor, a minimum anneal, the length cap). The actual
+probe/primer/anneal temperatures emerge from what the junction allows: an AT-rich junction lands in
+the high 50s, a GC-rich one higher.
 
-Probes shorter than 30 nt (quencher distance); 5′ ≠ G; more C than G; no runs > 3; hairpin Tm below the anneal temp.
+**Constraints (fixed):** each probe crosses the junction and carries all discriminating bases; matched
+Tms within `--match-window` (2 °C); each probe rejects the opposite junction by ≥ `--min-discrimination`
+(10 °C); probe < 30 nt; 5′ ≠ G; more C than G; no runs > 3; no self-folding at the (derived) anneal.
+
+**Objective (derives the temperature):** make the binding-limiting (colder) probe **as warm as the
+sequences allow** for good occupancy → then a tight matched-Tm gap → more discrimination → concentric
+nested windows (shorter probe nested in the longer, same centre → both compete at one site) → shorter
+probes. The chosen probe Tm sets everything else: **primers = probes − `--probe-primer-gap` (6 °C),
+and the run anneal = the primer Tm.**
 
 ## Tm model
 
