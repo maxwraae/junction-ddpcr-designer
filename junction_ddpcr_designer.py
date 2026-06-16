@@ -70,8 +70,9 @@ class Designer:
             sys.exit("ERROR: WT and TS are identical — no discriminating bases.")
         self.up_end, self.down_beg = min(self.MM), max(self.MM)+1
         # tunables
-        self.PRIMER_TM   = opt.get("primer_tm", 61.0)
+        self.PRIMER_TM   = opt.get("primer_tm", 61.0)   # also the probe-band anchor
         self.ANNEAL      = opt.get("anneal", 60.0)
+        self.GAP         = opt.get("probe_primer_gap", 6.0)  # primers this many C BELOW the probes
         self.IDT_OFF     = opt.get("idt_offset", 7.5)
         self.PROBE_MIN, self.PROBE_MAX   = opt.get("probe_len", (18, 29))
         self.PRIMER_MIN, self.PRIMER_MAX = opt.get("primer_len", (18, 28))
@@ -107,8 +108,10 @@ class Designer:
         lo, hi = self.PRIMER_TM+self.OVER_PRIMER[0], self.PRIMER_TM+self.OVER_PRIMER[1]
         WTw = [(a,b,L,s,self.ptm(s,s),self.ptm(s,self.TS[a:b])) for a,b,L,s in self._windows(self.WT)]
         TSw = [(a,b,L,s,self.ptm(s,s),self.ptm(s,self.WT[a:b])) for a,b,L,s in self._windows(self.TS)]
-        WTw = [w for w in WTw if lo<=w[4]<=hi and self.hp_tm(w[3])<self.ANNEAL]
-        TSw = [w for w in TSw if lo<=w[4]<=hi and self.hp_tm(w[3])<self.ANNEAL]
+        # probes must not self-fold at the (lowered) anneal = probe Tm - GAP ~ lo - GAP
+        hp_max = lo - self.GAP
+        WTw = [w for w in WTw if lo<=w[4]<=hi and self.hp_tm(w[3])<hp_max]
+        TSw = [w for w in TSw if lo<=w[4]<=hi and self.hp_tm(w[3])<hp_max]
         if not WTw or not TSw:
             sys.exit("ERROR: no probe windows satisfy the Tm / hairpin constraints — loosen --over-primer or --probe-len.")
         pairs=[]
@@ -129,9 +132,14 @@ class Designer:
         pairs.sort(key=lambda d:(-d["minD"], 0 if nested(d) else 1, concentric(d), d["gap"], d["Lw"]+d["Lt"]))
         self.pairs=pairs; self.best=best=pairs[0]
 
+        # Primers a fixed margin BELOW the probes (Bio-Rad: probe Tm 3-10 C above primers).
+        # Run the anneal near the (lower) primer Tm so the primers bind and the probes sit GAP above it.
+        self.PRIMER_TM = round((best["WTm"]+best["TSm"])/2 - self.GAP, 1)
+        self.ANNEAL    = self.PRIMER_TM
+
         # ---- STEP 2: shared primers around the probes ----
         p5, p3 = min(best["aw"],best["at"]), max(best["bw"],best["bt"])
-        self.FWD=(self._scan_primer(self.WT[:self.up_end],0,False,end_before=p5) or [None])[0]
+        self.FWD=(self._scan_primer(self.WT[:self.up_end],0,False,end_before=p5,prefer="5p") or [None])[0]
         revs=self._scan_primer(self.WT[self.down_beg:],self.down_beg,True,start_after=p3)
         self.REV=None
         if self.FWD and revs:
@@ -147,7 +155,7 @@ class Designer:
         self.REF=(self._scan_ref(self.WT[ref_lo:p5-1], ref_lo) or [None])[0]
         return best
 
-    def _scan_primer(self, region, off, want_rc, end_before=None, start_after=None):
+    def _scan_primer(self, region, off, want_rc, end_before=None, start_after=None, prefer=None):
         out=[]
         for L in range(self.PRIMER_MIN, self.PRIMER_MAX+1):
             for i in range(0, len(region)-L+1):
@@ -158,8 +166,12 @@ class Designer:
                 if p[-1] not in "GC" or maxrun(p)>3: continue
                 if sum(x in "GC" for x in p[-5:])>3: continue
                 if not (40<=gc(p)<=60): continue
+                if self.hp_tm(p) >= self.ANNEAL: continue   # no self-folding at the anneal temp
                 out.append(dict(seq=p,gs=gs,ge=ge,L=L,tm=self.primer_tm(p),gc=gc(p)))
-        out.sort(key=lambda d:(abs(d["tm"]-self.PRIMER_TM), abs(d["gc"]-53)))
+        if prefer=="5p":   # 5'-most primer within 2C of target (keeps room for the reference probe)
+            out.sort(key=lambda d:(0 if abs(d["tm"]-self.PRIMER_TM)<=2 else 1, d["gs"], abs(d["tm"]-self.PRIMER_TM)))
+        else:
+            out.sort(key=lambda d:(abs(d["tm"]-self.PRIMER_TM), abs(d["gc"]-53)))
         return out
 
     def _scan_ref(self, region, off, t_lo=60, t_hi=67):
@@ -241,8 +253,9 @@ def render_text(d, rows, assay, nf, nw):
     if d.REF:   print(f"  REF (Cy5) /5Cy5/{d.REF[1]}/3IAbRQSp/   (or HEX in a separate well on QX200)")
     print("-"*60)
     print(f"derived: WT {b['Lw']}nt Tm {b['WTm']} d{round(b['WTm']-b['WTo'],1)} | "
-          f"TS {b['Lt']}nt Tm {b['TSm']} d{round(b['TSm']-b['TSo'],1)} | "
-          f"matched-Tm gap {b['gap']} | primers {d.prim} | {len(d.pairs)} valid pairs")
+          f"TS {b['Lt']}nt Tm {b['TSm']} d{round(b['TSm']-b['TSo'],1)} | matched gap {b['gap']}")
+    print(f"         primers Tm {d.prim} ({round((b['WTm']+b['TSm'])/2-d.prim,1)}C below probes) | "
+          f"run anneal ~{d.ANNEAL}C | {len(d.pairs)} valid pairs")
     print("\nCHECKS  (OK pass / ~? flagged / ~X soft-fail / XX fail)\n"+"-"*60)
     for nm,seq,cs in rows:
         print(f"\n{nm}  {seq}")
@@ -322,6 +335,7 @@ def main():
     ap.add_argument("--anneal", type=float, default=60.0)
     ap.add_argument("--idt-offset", type=float, default=7.5)
     ap.add_argument("--match-window", type=float, default=2.0, help="max Tm difference between the two matched probes")
+    ap.add_argument("--probe-primer-gap", type=float, default=6.0, help="how many C the primers sit BELOW the probes (run anneal ~ primer Tm)")
     ap.add_argument("--example", action="store_true", help="run the built-in HEXA exon9|exon10 example")
     a=ap.parse_args()
 
@@ -336,7 +350,7 @@ def main():
         wt,ts,j,intron,title=HEXA_WT,HEXA_TS,HEXA_JUNCTION,HEXA_INTRON,"HEXA exon9|exon10"
 
     d=Designer(wt,ts,j, primer_tm=a.primer_tm, anneal=a.anneal, idt_offset=a.idt_offset,
-               match_window=a.match_window, intron=intron)
+               match_window=a.match_window, probe_primer_gap=a.probe_primer_gap, intron=intron)
     d.design()
     rows,assay,nf,nw=d.audit()
     render_text(d,rows,assay,nf,nw)
