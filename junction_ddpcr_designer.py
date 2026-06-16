@@ -235,6 +235,10 @@ def render_text(d, rows, assay, nf, nw):
     print(f"FORWARD         {d.FWD['seq'] if d.FWD else '-'}")
     print(f"REVERSE         {d.REV['seq'] if d.REV else '-'}")
     print(f"REFERENCE probe {d.REF[1] if d.REF else '- (none found)'}")
+    print("\nORDER (IDT) — add dye + ZEN + Iowa Black at order:")
+    if b['ts']: print(f"  TS (FAM)  /56-FAM/{b['ts'][:9]}/ZEN/{b['ts'][9:]}/3IABkFQ/")
+    if b['wt']: print(f"  WT (HEX)  /5HEX/{b['wt'][:9]}/ZEN/{b['wt'][9:]}/3IABkFQ/")
+    if d.REF:   print(f"  REF (Cy5) /5Cy5/{d.REF[1]}/3IAbRQSp/   (or HEX in a separate well on QX200)")
     print("-"*60)
     print(f"derived: WT {b['Lw']}nt Tm {b['WTm']} d{round(b['WTm']-b['WTo'],1)} | "
           f"TS {b['Lt']}nt Tm {b['TSm']} d{round(b['TSm']-b['TSo'],1)} | "
@@ -255,6 +259,20 @@ def render_html(d, rows, assay, nf, nw, title):
             ("Reverse primer","",d.REV['seq'] if d.REV else "-",d.REV['tm'] if d.REV else "-"),
             ("Reference probe","Cy5",d.REF[1] if d.REF else "-",d.REF[2] if d.REF else "-")]
     trows="".join(f"<tr><td>{n}</td><td>{dye}</td><td class=seq>{s}</td><td>{len(s) if s!='-' else '-'}</td><td>{tm}</td></tr>" for n,dye,s,tm in oligos)
+    # IDT order strings: probes carry dye + ZEN + Iowa Black quencher; primers are plain.
+    def idt(seq, kind):
+        if kind in ("FAM","HEX"):  # ZEN ~9 nt from 5', Iowa Black FQ at 3'
+            dye="56-FAM" if kind=="FAM" else "5HEX"
+            return f"/{dye}/{seq[:9]}/ZEN/{seq[9:]}/3IABkFQ/"
+        if kind=="Cy5":            # red dye -> Iowa Black RQ (no ZEN)
+            return f"/5Cy5/{seq}/3IAbRQSp/"
+        return seq
+    order=[("TS probe (rare)","FAM · junction well", idt(b['ts'],"FAM"), "PrimeTime qPCR", "HPLC"),
+           ("WT probe (abundant)","HEX · junction well", idt(b['wt'],"HEX"), "PrimeTime qPCR", "HPLC"),
+           ("Forward primer","— · both wells", d.FWD['seq'] if d.FWD else "-", "25 nmol DNA", "Standard desalt"),
+           ("Reverse primer","— · both wells", d.REV['seq'] if d.REV else "-", "25 nmol DNA", "Standard desalt"),
+           ("Reference probe (total)","Cy5* · reference well", idt(d.REF[1],"Cy5") if d.REF else "-", "PrimeTime qPCR", "HPLC")]
+    orows="".join(f"<tr><td>{n}</td><td>{ch}</td><td class=seq>{fmt}</td><td>{sc}</td><td>{pu}</td></tr>" for n,ch,fmt,sc,pu in order)
     D0=min(b['aw'],b['at'],d.FWD['gs'] if d.FWD else 0)-1
     D1=max(b['bw'],b['bt'],d.REV['ge'] if d.REV else len(d.WT))+1
     W=D1-D0; pc=lambda x:round((x-D0)/W*100,2)
@@ -280,8 +298,12 @@ p{{color:#666;font-size:13px}}
 <h1>{title} — competitive ddPCR oligos</h1>
 <div class=map><div class=jl></div><div class=jlab>junction</div><div class=ex style="left:6px">&larr; upstream exon</div><div class=ex style="right:6px">downstream exon &rarr;</div>{bars}</div>
 <p style="margin-top:0">Both probes cross the junction — they only bind the spliced product. Probes designed independently (nested windows); matched Tms within 2&deg;C.</p>
+<h2 style="font-size:15px;color:#2F5597;margin-top:22px">Bare sequences</h2>
 <table><tr><th>Oligo</th><th>Dye</th><th>Sequence 5'&rarr;3'</th><th>nt</th><th>Tm</th></tr>{trows}</table>
-<p>Bare sequences. Probes: add dye + ZEN/IBFQ double-quencher at order. Amplicon {d.REV['amp'] if d.REV else '-'} bp.</p>
+<h2 style="font-size:15px;color:#2F5597;margin-top:22px">Order sheet (IDT) &mdash; as you'd order it</h2>
+<table><tr><th>Oligo</th><th>Channel / well</th><th>IDT order (5'&rarr;3' with mods)</th><th>Scale</th><th>Purification</th></tr>{orows}</table>
+<p>Amplicon {d.REV['amp'] if d.REV else '-'} bp. ZEN sits ~9 nt from the 5' dye; Iowa Black FQ (FAM/HEX) or RQ (Cy5) at 3'.
+<b>*Reference well:</b> QX200 is 2-channel (FAM+HEX), so run the reference probe in a <b>separate well</b> as FAM or HEX; use Cy5 in the same well only on a 6-channel reader (QX600). Confirm all Tm / any LNA in IDT OligoAnalyzer.</p>
 <div class="banner {'bpass' if nf==0 else 'bfail'}">{'ALL CHECKS PASS' if nf==0 else str(nf)+' check(s) failed'}{f' &middot; {nw} flagged' if nw else ''}</div>
 {cards}
 <p style="color:#888">IDT-scale Tm (offset {d.IDT_OFF}C, MECP2-calibrated). Still pending: BLAST specificity vs paralogs/pseudogenes (separate step).</p>"""
