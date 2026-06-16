@@ -69,17 +69,17 @@ class Designer:
         if not self.MM:
             sys.exit("ERROR: WT and TS are identical — no discriminating bases.")
         self.up_end, self.down_beg = min(self.MM), max(self.MM)+1
-        # tunables
-        self.PRIMER_TM   = opt.get("primer_tm", 61.0)   # also the probe-band anchor
-        self.ANNEAL      = opt.get("anneal", 60.0)
-        self.GAP         = opt.get("probe_primer_gap", 6.0)  # primers this many C BELOW the probes
-        self.IDT_OFF     = opt.get("idt_offset", 7.5)
+        # CONSTRAINTS ONLY (fixed). No absolute Tm is preset anywhere — temperature is DERIVED in design().
+        self.GAP          = opt.get("probe_primer_gap", 6.0)    # primers this many C BELOW the probes
+        self.MATCH_WINDOW = opt.get("match_window", 2.0)        # the two probes within this of each other
+        self.DISC_FLOOR   = opt.get("min_discrimination", 10.0) # each probe rejects the opposite junction by >= this
+        self.MIN_ANNEAL   = opt.get("min_anneal", 50.0)         # derived anneal must stay >= this (workable PCR)
+        self.IDT_OFF      = opt.get("idt_offset", 7.5)
         self.PROBE_MIN, self.PROBE_MAX   = opt.get("probe_len", (18, 29))
         self.PRIMER_MIN, self.PRIMER_MAX = opt.get("primer_len", (18, 28))
-        self.MATCH_WINDOW = opt.get("match_window", 2.0)
-        self.OVER_PRIMER  = opt.get("over_primer", (0.0, 11.0))
         self.AMPLICON     = opt.get("amplicon", (60, 200))
         self.INTRON       = opt.get("intron", None)
+        self.PRIMER_TM = self.ANNEAL = None    # DERIVED in design(), never preset
         self.SALT = dict(Na=50, Mg=3, dNTPs=0.8, dnac1=250, dnac2=0, saltcorr=7)
 
     # ---- Tm helpers (IDT scale) ----
@@ -105,37 +105,39 @@ class Designer:
         return out
 
     def design(self):
-        lo, hi = self.PRIMER_TM+self.OVER_PRIMER[0], self.PRIMER_TM+self.OVER_PRIMER[1]
+        # Every valid probe window. Tm is NOT anchored to any target — it is DERIVED below from what
+        # the sequences allow. Only CONSTRAINTS are fixed (matched window, discrimination floor,
+        # gap, min anneal, length, no 5' G, no self-folding at the *derived* anneal).
         WTw = [(a,b,L,s,self.ptm(s,s),self.ptm(s,self.TS[a:b])) for a,b,L,s in self._windows(self.WT)]
         TSw = [(a,b,L,s,self.ptm(s,s),self.ptm(s,self.WT[a:b])) for a,b,L,s in self._windows(self.TS)]
-        # probes must not self-fold at the (lowered) anneal = probe Tm - GAP ~ lo - GAP
-        hp_max = lo - self.GAP
-        WTw = [w for w in WTw if lo<=w[4]<=hi and self.hp_tm(w[3])<hp_max]
-        TSw = [w for w in TSw if lo<=w[4]<=hi and self.hp_tm(w[3])<hp_max]
         if not WTw or not TSw:
-            sys.exit("ERROR: no probe windows satisfy the Tm / hairpin constraints — loosen --over-primer or --probe-len.")
+            sys.exit("ERROR: no probe window crosses the junction and carries all discriminating bases.")
         pairs=[]
         for (aw,bw,Lw,wt,WTm,WTo) in WTw:
             for (at,bt,Lt,ts,TSm,TSo) in TSw:
                 gap=round(abs(WTm-TSm),1)
-                if gap>self.MATCH_WINDOW: continue
+                if gap>self.MATCH_WINDOW: continue                          # probes matched to each other
+                minD=round(min(WTm-WTo, TSm-TSo),1)
+                if minD<self.DISC_FLOOR: continue                          # each probe discriminates enough
+                mean=round((WTm+TSm)/2,1); anneal=round(mean-self.GAP,1)    # anneal DERIVED = probe Tm - gap
+                if anneal<self.MIN_ANNEAL: continue                        # anneal stays a workable PCR temp
+                if self.hp_tm(wt)>=anneal or self.hp_tm(ts)>=anneal: continue  # no self-fold at that anneal
                 pairs.append(dict(aw=aw,bw=bw,Lw=Lw,wt=wt,WTm=WTm,WTo=WTo,
-                                  at=at,bt=bt,Lt=Lt,ts=ts,TSm=TSm,TSo=TSo,gap=gap,
-                                  minD=round(min(WTm-WTo, TSm-TSo),1)))
+                                  at=at,bt=bt,Lt=Lt,ts=ts,TSm=TSm,TSo=TSo,
+                                  gap=gap,minD=minD,mean=mean,anneal=anneal,limtm=min(WTm,TSm)))
         if not pairs:
-            sys.exit(f"ERROR: no probe pair within {self.MATCH_WINDOW} C — raise --match-window.")
-        # Ranking principles: (1) strongest weaker-probe discrimination; (2) windows concentric
-        # (shorter nested in longer, same centre -> compete at one site); (3) smaller gap; (4) shorter.
+            sys.exit("ERROR: no probe pair meets the constraints — loosen --min-discrimination, "
+                     "--match-window, --probe-primer-gap or --min-anneal.")
+        # Objective (this is what DERIVES the temperature): make the binding-limiting (colder) probe as
+        # WARM as the sequences allow (best occupancy), then a tight matched-Tm gap, then more
+        # discrimination, then concentric nested windows, then shorter probes. No absolute Tm appears here.
         def nested(d):
             return (d["at"]<=d["aw"] and d["bw"]<=d["bt"]) if d["Lw"]<=d["Lt"] else (d["aw"]<=d["at"] and d["bt"]<=d["bw"])
         def concentric(d): return abs((d["aw"]+d["bw"])-(d["at"]+d["bt"]))/2
-        pairs.sort(key=lambda d:(-d["minD"], 0 if nested(d) else 1, concentric(d), d["gap"], d["Lw"]+d["Lt"]))
+        pairs.sort(key=lambda d:(-d["limtm"], d["gap"], -d["minD"], 0 if nested(d) else 1, concentric(d), d["Lw"]+d["Lt"]))
         self.pairs=pairs; self.best=best=pairs[0]
-
-        # Primers a fixed margin BELOW the probes (Bio-Rad: probe Tm 3-10 C above primers).
-        # Run the anneal near the (lower) primer Tm so the primers bind and the probes sit GAP above it.
-        self.PRIMER_TM = round((best["WTm"]+best["TSm"])/2 - self.GAP, 1)
-        self.ANNEAL    = self.PRIMER_TM
+        self.PRIMER_TM = round(best["mean"]-self.GAP, 1)   # DERIVED: primers GAP below the probes
+        self.ANNEAL    = best["anneal"]                    # DERIVED: run anneal near the primer Tm
 
         # ---- STEP 2: shared primers around the probes ----
         p5, p3 = min(best["aw"],best["at"]), max(best["bw"],best["bt"])
@@ -152,7 +154,7 @@ class Designer:
 
         # ---- STEP 3: upstream reference probe (inside amplicon, before the junction probes) ----
         ref_lo=(self.FWD["ge"]+1) if self.FWD else 1
-        self.REF=(self._scan_ref(self.WT[ref_lo:p5-1], ref_lo) or [None])[0]
+        self.REF=(self._scan_ref(self.WT[ref_lo:p5-1], ref_lo, self.best["mean"]) or [None])[0]
         return best
 
     def _scan_primer(self, region, off, want_rc, end_before=None, start_after=None, prefer=None):
@@ -174,16 +176,19 @@ class Designer:
             out.sort(key=lambda d:(abs(d["tm"]-self.PRIMER_TM), abs(d["gc"]-53)))
         return out
 
-    def _scan_ref(self, region, off, t_lo=60, t_hi=67):
+    def _scan_ref(self, region, off, target):
+        # Tm range derived from the run: bind at the anneal, sit near the junction probes' Tm.
+        t_lo, t_hi = self.ANNEAL, self.ANNEAL + 13
         out=[]
         for L in range(20,27):
             for i in range(0,len(region)-L+1):
                 s=region[i:i+L]
                 s2 = rc(s) if (s[0]=="G" or s.count("C")<s.count("G")) else s
-                if s2[0]=="G" or maxrun(s2)>3 or self.hp_tm(s2)>=self.ANNEAL: continue
+                if s2[0]=="G" or s2.count("C")<s2.count("G"): continue   # need 5'!=G AND C>=G (both strands failed)
+                if maxrun(s2)>3 or self.hp_tm(s2)>=self.ANNEAL: continue
                 t=self.ptm(s2,s2)
                 if t_lo<=t<=t_hi and 30<=gc(s2)<=80:
-                    out.append((round(abs(t-63),2), s2, t, gc(s2), off+i, off+i+L))
+                    out.append((round(abs(t-target),2), s2, t, gc(s2), off+i, off+i+L))
         out.sort()
         return out
 
@@ -331,11 +336,11 @@ def main():
     ap.add_argument("--config", help="JSON file with {wt, ts, junction, intron, title}")
     ap.add_argument("--title", default="junction", help="label for the HTML report")
     ap.add_argument("--out", help="write an HTML report to this path")
-    ap.add_argument("--primer-tm", type=float, default=61.0)
-    ap.add_argument("--anneal", type=float, default=60.0)
     ap.add_argument("--idt-offset", type=float, default=7.5)
     ap.add_argument("--match-window", type=float, default=2.0, help="max Tm difference between the two matched probes")
     ap.add_argument("--probe-primer-gap", type=float, default=6.0, help="how many C the primers sit BELOW the probes (run anneal ~ primer Tm)")
+    ap.add_argument("--min-discrimination", type=float, default=10.0, help="each probe must reject the opposite junction by at least this many C")
+    ap.add_argument("--min-anneal", type=float, default=50.0, help="the DERIVED anneal must stay at or above this")
     ap.add_argument("--example", action="store_true", help="run the built-in HEXA exon9|exon10 example")
     a=ap.parse_args()
 
@@ -349,8 +354,9 @@ def main():
             ap.error("provide --wt, --ts and --junction together (or --config, or --example).")
         wt,ts,j,intron,title=HEXA_WT,HEXA_TS,HEXA_JUNCTION,HEXA_INTRON,"HEXA exon9|exon10"
 
-    d=Designer(wt,ts,j, primer_tm=a.primer_tm, anneal=a.anneal, idt_offset=a.idt_offset,
-               match_window=a.match_window, probe_primer_gap=a.probe_primer_gap, intron=intron)
+    d=Designer(wt,ts,j, idt_offset=a.idt_offset, match_window=a.match_window,
+               probe_primer_gap=a.probe_primer_gap, min_discrimination=a.min_discrimination,
+               min_anneal=a.min_anneal, intron=intron)
     d.design()
     rows,assay,nf,nw=d.audit()
     render_text(d,rows,assay,nf,nw)
