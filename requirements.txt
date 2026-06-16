@@ -1,0 +1,2 @@
+biopython>=1.80
+primer3-py>=2.0
