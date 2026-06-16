@@ -47,8 +47,13 @@ python junction_ddpcr_designer.py --config myjunction.json --out report.html
 { "wt": "....", "ts": "....", "junction": 87, "intron": 289, "title": "MYGENE exonA|exonB" }
 ```
 
-Key options: `--primer-tm` (default 61), `--anneal` (60), `--match-window` (2.0 °C),
-`--idt-offset` (7.5), `--intron` (enables the gDNA-by-length check).
+Key options: `--probe-primer-gap` (default **6** — primers are designed this many °C *below*
+the probes, per Bio-Rad's probe-over-primer rule; the run anneal is set near the primer Tm),
+`--match-window` (2.0 °C), `--idt-offset` (7.5), `--intron` (enables the gDNA-by-length check).
+
+> **Run the anneal near the primer Tm**, not at a generic 60 °C. With `--probe-primer-gap 6`
+> the primers come out ~6 °C below the probes (e.g. ~55 °C); run them at a ~55 °C anneal (use the
+> 55–65 °C gradient — the optimum sits at the low end). Low-Tm primers run at 60 °C go silent on cDNA.
 
 ## How it chooses (the principles)
 
